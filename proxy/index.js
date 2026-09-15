@@ -95,6 +95,13 @@ const POLYFILL = '<script>(function(){try{if(typeof crypto!=="undefined"&&crypto
 const LOOPBACK_JS_NEEDLE = 'isLoopbackHostname(pageLocation.hostname)';
 const LOOPBACK_JS_REPLACEMENT = 'true';
 
+// 是否允许远程（非回环）访问使用 DSH 的设置类功能（插件配置卡片、设置文件按钮等）。
+// 该改写会打穿 DSH 自身「仅回环可用设置」的安全边界，因此做成可开关：
+//   ALLOW_REMOTE_SETTINGS=false → 不改写，远程访问只能用基础功能。
+// 默认 true 以保持本镜像「局域网可用」的既有行为。前提是认证已启用——
+// entrypoint.sh 在未配置 PROXY_PASSWORD 时会强制生成随机密码，不会静默放行。
+const ALLOW_REMOTE_SETTINGS = String(process.env.ALLOW_REMOTE_SETTINGS || 'true').toLowerCase() !== 'false';
+
 proxy.on('proxyRes', (proxyRes, req, res) => {
   const ct = String(proxyRes.headers['content-type'] || '');
   const isHtml = ct.includes('text/html');
@@ -112,7 +119,7 @@ proxy.on('proxyRes', (proxyRes, req, res) => {
       return Buffer.from(injectIntoHead(text, POLYFILL));
     }
     // JS：仅当命中目标判定串时才改写（未命中返回 null → 原样透传，不做无谓重压）
-    if (text.includes(LOOPBACK_JS_NEEDLE)) {
+    if (ALLOW_REMOTE_SETTINGS && text.includes(LOOPBACK_JS_NEEDLE)) {
       return Buffer.from(text.split(LOOPBACK_JS_NEEDLE).join(LOOPBACK_JS_REPLACEMENT));
     }
     return null;
@@ -136,12 +143,23 @@ const server = http.createServer((req, res) => {
   }
   // 根目录 GET 走 serveIndex：上游(如官方 0.1.2+)返回 401 时携带 launch token 重发一次，
   // 换取会话 cookie；返回 false（异常）则回退到普通反向代理。
+  // 必须挂 .catch：Node 24 默认 --unhandled-rejections=throw，未处理的 Promise
+  // 拒绝会直接终止进程（整个代理挂掉），这里兜底回退到普通反向代理。
   if (req.method === 'GET' && pathname === '/') {
     serveIndex(req, res, { origin: TARGET_ORIGIN, transformHtml: html => injectIntoHead(html, POLYFILL) })
       .then((handled) => {
         if (handled) return;
         alignOrigin(req);
         proxy.web(req, res);
+      })
+      .catch((err) => {
+        console.error('[proxy] serveIndex 异常，回退普通反向代理：', err && err.message);
+        if (!res.headersSent) {
+          alignOrigin(req);
+          proxy.web(req, res);
+        } else if (!res.writableEnded) {
+          res.end();
+        }
       });
     return;
   }
@@ -158,6 +176,90 @@ server.on('upgrade', (req, socket, head) => {
   proxy.ws(req, socket, head);
 });
 
+// 畸形请求（非法 HTTP 报文、超长请求行等）会触发 clientError；不处理则 socket
+// 悬挂并打印未捕获错误。统一回 400 后销毁。
+server.on('clientError', (err, socket) => {
+  if (socket && socket.writable && !socket.destroyed) {
+    socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+  } else if (socket && socket.destroy) {
+    socket.destroy();
+  }
+});
+
+// 端口占用/权限不足时 listen 会 emit error；不处理则抛未捕获异常，容器反复重启
+// 且日志看不出原因。这里打印明确信息后退出。
+server.on('error', (err) => {
+  console.error(`[proxy] 监听 0.0.0.0:${LISTEN_PORT} 失败：${err.code || err.message}`);
+  process.exit(1);
+});
+
 server.listen(LISTEN_PORT, '0.0.0.0', () => {
   console.log(`代理已启动，监听 0.0.0.0:${LISTEN_PORT}，转发到 ${TARGET_ORIGIN}${AUTH_USER && AUTH_PASS ? '（Basic Auth 已启用）' : '（未启用认证）'}`);
+});
+
+// ── DSH 存活监控 ────────────────────────────────────────────────────
+// 上游 DSH 崩溃后，代理仍能响应（对每个请求回 502），容器 STATUS 保持 Up，
+// docker restart 策略不会触发 → 服务永久不可用直到人工介入。
+// 这里探测 DSH 进程是否存活（entrypoint.sh 通过 DSH_PID 传入），进程消失即退出，
+// 交给 tini + restart 策略重建整个容器。
+const DSH_PID = Number(process.env.DSH_PID) || 0;
+const LIVENESS_INTERVAL = Number(process.env.DSH_LIVENESS_INTERVAL) || 10000;
+
+function dshAlive() {
+  if (!DSH_PID) return true; // 未提供 PID（如直接跑 node index.js 调试）→ 不监控
+  try {
+    process.kill(DSH_PID, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM'; // 无权限说明进程存在
+  }
+}
+
+if (DSH_PID) {
+  const livenessTimer = setInterval(() => {
+    if (dshAlive()) return;
+    console.error(`[proxy] DSH 进程（pid ${DSH_PID}）已退出，代理无法继续服务，退出容器以触发重启`);
+    shutdown(1);
+  }, LIVENESS_INTERVAL);
+  livenessTimer.unref();
+}
+
+// ── 优雅退出 ────────────────────────────────────────────────────────
+// tini 会把 SIGTERM/SIGINT 转发给本进程（PID 1 是 tini，node 是其子进程）。
+// 收到信号后：停止接收新连接 → 关闭已有连接 → 杀掉 DSH → 退出。
+let shuttingDown = false;
+function shutdown(code = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[proxy] 收到退出信号，开始优雅关闭（exit code ${code}）...`);
+
+  const forceTimer = setTimeout(() => {
+    console.error('[proxy] 优雅关闭超时（10s），强制退出');
+    process.exit(code);
+  }, 10000);
+  forceTimer.unref();
+
+  server.close(() => {
+    if (DSH_PID) {
+      try { process.kill(DSH_PID, 'SIGTERM'); } catch {}
+    }
+    clearTimeout(forceTimer);
+    process.exit(code);
+  });
+  // server.close 不会主动断开已建立的 keep-alive/WS 连接，这里主动关闭
+  server.closeAllConnections?.();
+}
+
+process.on('SIGTERM', () => shutdown(0));
+process.on('SIGINT', () => shutdown(0));
+
+// 最后一道防线：任何未捕获异常/未处理拒绝都记录后退出，交给 restart 策略重建，
+// 避免进程处于半死状态（端口在听但不转发）。
+process.on('uncaughtException', (err) => {
+  console.error('[proxy] 未捕获异常，退出进程：', err && err.stack || err);
+  shutdown(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[proxy] 未处理的 Promise 拒绝，退出进程：', reason);
+  shutdown(1);
 });

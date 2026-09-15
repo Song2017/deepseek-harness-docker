@@ -2,5 +2,10 @@ node_modules
 proxy/node_modules
 manager/node_modules
 .git
+.gitignore
 *.log
 *.err
+# 含明文密码，禁止打进镜像
+.env
+.env.*
+!.env.example

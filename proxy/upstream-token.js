@@ -79,7 +79,8 @@ function scanOnce() {
   const token = extractFromText(readTail(LOG_FILE, 512 * 1024));
   if (token) {
     const t = token.trim();
-    try { fs.writeFileSync(TOKEN_FILE_AUTO, t); } catch {}
+    // launch token 是敏感凭据，落盘限 0600（仅属主可读写），避免容器内其他进程读取
+    try { fs.writeFileSync(TOKEN_FILE_AUTO, t, { mode: 0o600 }); } catch {}
     state.token = t;
     state.source = 'auto';
     state.done = true;
@@ -169,11 +170,33 @@ async function fetchRaw(origin, headers, path) {
   const url = path && path !== '/' ? origin + path : origin + '/';
   const res = await fetch(url, { method: 'GET', headers, redirect: 'manual' });
   const getSetCache = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
+  // 仅用于根目录首页（HTML，体积小）。仍加一道上限，防止异常上游返回超大 body 撑爆内存。
+  const MAX_INDEX_BYTES = Number(process.env.DSH_MAX_INDEX_BYTES) || 4 * 1024 * 1024; // 4 MiB
+  let body = '';
+  if (res.body) {
+    const reader = res.body.getReader();
+    const parts = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value ? value.length : 0;
+      if (total > MAX_INDEX_BYTES) {
+        try { await reader.cancel(); } catch {}
+        console.warn(`[upstream-token] 首页响应超过 ${MAX_INDEX_BYTES} 字节上限，截断读取`);
+        break;
+      }
+      if (value) parts.push(value);
+    }
+    body = Buffer.concat(parts).toString('utf8');
+  } else {
+    body = await res.text();
+  }
   return {
     status: res.status,
     headers: res.headers,
     setCookies: Array.isArray(getSetCache) ? getSetCache : [],
-    body: await res.text(),
+    body,
   };
 }
 

@@ -21,7 +21,7 @@ An out-of-the-box **DeepSeek Harness (DSH)** Docker image with a built-in Node r
 - **Why a proxy is needed**:
   - DSH officially forbids `--host 0.0.0.0` (security restriction) and can only listen on the loopback address;
   - Pages loaded over a LAN IP are in a browser **non-secure context**, where the `crypto.randomUUID` used by the DSH frontend is unavailable. The proxy automatically injects a `getRandomValues`-based polyfill into served HTML; without it the realtime channel (WS) stays pending forever;
-  - The proxy also provides optional **HTTP Basic Auth** to protect LAN access.
+  - The proxy also provides **HTTP Basic Auth**. DSH ships a terminal (node-pty), so an unauthenticated public port is effectively an exposed shell — auth is therefore **enforced by default**: when `PROXY_PASSWORD` is unset, the startup script generates a random password and prints it to the container log (`docker logs`).
 
 ## Quick Start (pull & run)
 
@@ -33,7 +33,7 @@ docker pull smanx/deepseek-harness:latest
 docker run -d \
   --name dsh-harness \
   -p 3080:3080 \
-  -v dsh-data:/root/.dsh \
+  -v dsh-data:/home/node/.dsh \
   --restart unless-stopped \
   smanx/deepseek-harness:latest
 
@@ -42,7 +42,39 @@ docker run -d \
 #    LAN:           http://<server-LAN-IP>:3080/
 ```
 
+> **A password is required on first start**: when `PROXY_PASSWORD` is unset, a random password is
+> generated automatically — check it with `docker logs dsh-harness` (username defaults to `admin`).
+> To use a fixed password, add `-e PROXY_PASSWORD=yourpass`; see
+> [Enabling Basic Auth](#enabling-basic-auth) below.
+
 The WebSocket realtime channels (`/api/events.mux`, `/api/events.host`) are forwarded automatically by the proxy — no extra configuration needed.
+
+### Using docker compose (recommended)
+
+Config lives in `.env`, making upgrades/recreation easier. The repo ships `docker-compose.yml` and `.env.example`:
+
+```bash
+# 1. Clone the repo (or download docker-compose.yml + .env.example separately)
+git clone https://github.com/smanx/deepseek-harness-docker.git && cd deepseek-harness-docker
+
+# 2. Prepare config (leaving PROXY_PASSWORD empty = a random password is generated on each start)
+cp .env.example .env
+
+# 3. Start + view logs/health
+docker compose up -d
+docker compose logs -f     # includes the random password, Ctrl+C to exit
+docker compose ps          # STATUS should show Up (healthy)
+```
+
+Common operations:
+
+```bash
+docker compose restart                          # restart
+docker compose down                             # stop & remove the container (dsh-data volume kept)
+docker compose pull && docker compose up -d     # upgrade the image
+```
+
+> `.env` contains plaintext credentials and is excluded via `.gitignore` / `.dockerignore` — never commit it.
 
 ### Differences between the tags
 
@@ -62,7 +94,7 @@ The WebSocket realtime channels (`/api/events.mux`, `/api/events.host`) are forw
 docker run -d \
   --name dsh-harness \
   -p 3080:3080 \
-  -v dsh-data:/root/.dsh \
+  -v dsh-data:/home/node/.dsh \
   --restart unless-stopped \
   smanx/deepseek-harness:latest
 
@@ -71,7 +103,7 @@ docker run -d \
 docker run -d \
   --name dsh-harness \
   -p 3080:3080 \
-  -v dsh-data:/root/.dsh \
+  -v dsh-data:/home/node/.dsh \
   --restart unless-stopped \
   smanx/deepseek-harness:devtools-min-latest
 
@@ -80,7 +112,7 @@ docker run -d \
 docker run -d \
   --name dsh-harness \
   -p 3080:3080 \
-  -v dsh-data:/root/.dsh \
+  -v dsh-data:/home/node/.dsh \
   --restart unless-stopped \
   smanx/deepseek-harness:devtools-latest
 ```
@@ -105,7 +137,7 @@ The `admin` variant **pre-installs the latest DSH (@next)**. After the container
 docker run -d \
   --name dsh-harness \
   -p 3080:3080 \
-  -v dsh-data:/root/.dsh \
+  -v dsh-data:/home/node/.dsh \
   -v dsh-install:/opt/dsh \
   --restart unless-stopped \
   smanx/deepseek-harness:admin-latest
@@ -127,7 +159,7 @@ docker pull ghcr.io/smanx/deepseek-harness:latest
 docker run -d \
   --name dsh-harness \
   -p 3080:3080 \
-  -v dsh-data:/root/.dsh \
+  -v dsh-data:/home/node/.dsh \
   --restart unless-stopped \
   ghcr.io/smanx/deepseek-harness:latest
 ```
@@ -140,8 +172,15 @@ docker run -d \
 |---|---|---|
 | `DSH_PORT` | Source port: where DSH listens inside the container (`127.0.0.1`) | `3079` |
 | `PROXY_PORT` | Proxy port: where the proxy listens (LAN entry point) | `3080` |
-| `PROXY_USERNAME` | Basic Auth username (optional) | unset |
-| `PROXY_PASSWORD` | Basic Auth password (optional) | unset |
+| `PROXY_USERNAME` | Basic Auth username | `admin` |
+| `PROXY_PASSWORD` | Basic Auth password; **a random password is generated at startup and printed to the log if unset** | (random) |
+| `ALLOW_REMOTE_SETTINGS` | Whether non-loopback access may use DSH settings features (rewrites `isLoopbackHostname` to always-true); set `false` to disable | `true` |
+| `DSH_READY_TIMEOUT` | Seconds to wait for DSH readiness (raise it when the first plugin install / npm registry is slow) | `120` |
+| `DSH_LOG_MAX_KB` / `DSH_LOG_KEEP_KB` | `.dsh-web.log` rotation trigger / tail size kept after rotation (KiB) | `8192` / `1024` |
+| `DSH_LIVENESS_INTERVAL` | Interval (ms) at which the proxy probes the DSH process; if DSH dies the container exits so the restart policy rebuilds it | `10000` |
+| `PROXY_MAX_BODY_BYTES` | Per-response body buffering cap (bytes); beyond it the proxy stops rewriting and streams the body through untouched | `33554432` (32 MiB) |
+| `PROXY_MAX_DECOMPRESSED_BYTES` | Cap on decompressed size (decompression-bomb guard) | `67108864` (64 MiB) |
+| `DSH_MAX_INDEX_BYTES` | Cap on bytes read from the root index page | `4194304` (4 MiB) |
 | `NPM_CONFIG_REGISTRY` | Default npm registry on the admin page (lower priority than the page config) | `https://registry.npmjs.org/` |
 | `DSH_INSTALL_DIR` | DSH install directory in the admin variant (installed DSH and config state live here; mount a named volume) | `/opt/dsh` |
 
@@ -150,19 +189,26 @@ docker run -d \
 
 ### Enabling Basic Auth
 
+Auth is **enforced by default** (DSH ships a terminal — an unauthenticated public port is effectively an exposed shell):
+
+- **`PROXY_PASSWORD` unset**: a random password for this run is generated at startup and printed to the log — check it with `docker logs dsh-harness` (username defaults to `admin`). The random password changes on every restart.
+- **Explicit credentials** (recommended; survives restarts):
+
 ```bash
 docker run -d \
   --name dsh-harness \
   -p 3080:3080 \
-  -v dsh-data:/root/.dsh \
+  -v dsh-data:/home/node/.dsh \
   -e PROXY_USERNAME=yourname \
   -e PROXY_PASSWORD=yourpass \
   --restart unless-stopped \
   smanx/deepseek-harness:latest
 ```
 
-- Auth is enabled **only when both** username and password are set; if either (or both) is missing, access is completely open;
-- Auth applies to both HTTP and WebSocket. Unauthenticated requests get `401` + `WWW-Authenticate`, and the browser shows a credential prompt.
+- Auth applies to both HTTP and WebSocket. Unauthenticated requests get `401` + `WWW-Authenticate`, and the browser shows a credential prompt;
+- The public static resources `/manifest.webmanifest`, `/favicon.svg`, `/favicon.ico` are exempt from auth (they only contain non-sensitive data like the app name/icon). Browsers fetching `<link rel="manifest">` do not send Basic Auth credentials; enforcing auth there would make the console keep reporting `/manifest.webmanifest` 401.
+
+> **Security note**: Basic Auth credentials are passed via environment variables and are visible through `docker inspect` and `/proc/<pid>/environ`. For stricter requirements, put the container behind a reverse proxy (e.g. Traefik/Caddy) that handles auth and TLS centrally, and let the container listen on the internal network only.
 
 ### Changing the proxy port
 
@@ -171,7 +217,7 @@ docker run -d \
 docker run -d \
   --name dsh-harness \
   -p 3088:3088 \
-  -v dsh-data:/root/.dsh \
+  -v dsh-data:/home/node/.dsh \
   -e PROXY_PORT=3088 \
   --restart unless-stopped \
   smanx/deepseek-harness:latest
@@ -179,10 +225,29 @@ docker run -d \
 
 ## Data Persistence
 
-DSH session/configuration data lives in `/root/.dsh` inside the container; the commands above persist it via the named volume `dsh-data`:
+DSH session/configuration data lives in `/home/node/.dsh` inside the container; the commands above persist it via the named volume `dsh-data`:
 
 - Data survives `docker stop/start` and container removal;
 - To wipe it completely: `docker volume rm dsh-data` (stop the container first).
+
+> **The container runs as the `node` user (uid 1000), not root.** The volume is mounted at `/home/node/.dsh` (earlier versions used `/root/.dsh`).
+> **Upgrading from an old version**: files in the old volume are owned by root, so mounting them into the new image makes DSH fail to write. Fix ownership before recreating the container:
+> `docker run --rm -v dsh-data:/data alpine chown -R 1000:1000 /data`;
+> if the old deployment still mounts the volume at `/root/.dsh`, change it to `/home/node/.dsh`, otherwise data lands in the unmounted container layer and is lost on recreation.
+
+## Stability & Operations
+
+The image is hardened for stability (most behaviours are tunable via environment variables, see [Configuration](#configuration-environment-variables)):
+
+- **Process model**: `tini` runs as PID 1, forwarding signals and reaping zombies;
+- **DSH liveness monitor**: if upstream DSH crashes, the proxy exits the container so the `--restart` policy rebuilds it, avoiding a permanent-502 state;
+- **Graceful shutdown**: on SIGTERM/SIGINT the proxy stops accepting new connections, closes existing ones, terminates DSH, then exits;
+- **Health check**: a built-in `HEALTHCHECK` makes the STATUS column of `docker ps` show `(healthy)` / `(unhealthy)`;
+- **Log rotation**: `.dsh-web.log` is rotated by actual disk usage (copy-truncate), preventing the writable layer from filling up;
+- **Response-body protection**: decompression/recompression is async with size caps, covering both large files and decompression bombs.
+
+> **Reproducible builds**: the image installs `@deepseek-ai/dsh@next` by default. For production, pin the version:
+> `docker build --build-arg DSH_VERSION=0.1.2 -t smanx/deepseek-harness .`
 
 ## Stop / Restart / Remove
 

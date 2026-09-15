@@ -10,7 +10,7 @@
 // 数据持久化约定：
 //   - DSH 安装到 INSTALL_DIR（建议挂载命名卷，如 dsh-install:/opt/dsh），已装版本与状态文件都在卷上，
 //     容器重建后无需重装，管理服务启动时自动识别并拉起 DSH；
-//   - DSH 自身配置/会话仍在 ~/.dsh（建议挂载 dsh-data:/root/.dsh）。
+//   - DSH 自身配置/会话仍在 ~/.dsh（建议挂载 dsh-data:/home/node/.dsh）。
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
