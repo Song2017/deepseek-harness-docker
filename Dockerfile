@@ -75,7 +75,7 @@ RUN chmod +x /app/entrypoint.sh
 # `exec node index.js` 替换掉 shell —— 没有 init 进程时这些子进程退出后会变成
 # 僵尸，SIGTERM 也无法送达整个进程组。
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini, curl \
+    && apt-get install -y --no-install-recommends tini curl \
     && rm -rf /var/lib/apt/lists/*
 
 # admin 变体标记：镜像内存在 /app/.admin-mode 时 entrypoint.sh 改走管理服务
