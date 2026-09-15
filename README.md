@@ -42,15 +42,16 @@ deepseek-harness/
 cd deepseek-harness
 
 # 构建镜像（默认精简运行镜像，不带开发工具）
-docker build -t songgs/deepseek-harness .
+docker build -t songgs/deepseek-harness . 
 
 # 启动（默认：代理对外端口 3080，数据持久化到命名卷 dsh-data）
+# registry.cn-shanghai.aliyuncs.com/nsmi/deepseek-harness:latest
 docker run -d \
   --name dsh-harness \
   -p 3080:3080 \
   -v dsh-data:/home/node/.dsh \
   --restart unless-stopped \
-  songgs/deepseek-harness
+  songgs/deepseek-harness 
 
 # 查看日志
 docker logs -f dsh-harness

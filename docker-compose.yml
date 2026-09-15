@@ -9,7 +9,7 @@
 
 services:
   dsh-harness:
-    image: songgs/deepseek-harness:latest
+    image: registry.cn-shanghai.aliyuncs.com/nsmi/deepseek-harness:latest
     # 从本目录 Dockerfile 构建（可选，docker compose build 时使用）
     build:
       context: .
@@ -24,11 +24,14 @@ services:
       - "${HOST_PORT:-3080}:${PROXY_PORT:-3080}"
     volumes:
       # DSH 会话/配置。容器以 node(uid 1000) 运行，故路径是 /home/node/.dsh
+      # 注意：docker 自动创建的 ./data/dsh 属主是 root，容器内 node(uid 1000)
+      # 无法写入。首次部署需在宿主机执行一次（1Panel 终端即可）：
+      #   mkdir -p ./data/dsh && chown -R 1000:1000 ./data/dsh
       - dsh-data:/home/node/.dsh
     environment:
       # 认证：PROXY_PASSWORD 留空则 entrypoint.sh 自动生成随机密码并打印到日志
       PROXY_USERNAME: ${PROXY_USERNAME:-admin}
-      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
+      PROXY_PASSWORD: ${PROXY_PASSWORD:-test2026}
       # 端口（两者必须不同）
       DSH_PORT: ${DSH_PORT:-3079}
       PROXY_PORT: ${PROXY_PORT:-3080}
