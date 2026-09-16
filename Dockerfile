@@ -50,22 +50,6 @@ COPY --from=dsh-builder /usr/local/ /usr/local/
 # （首次挂载空卷时 Docker 自动填充该目录，管理服务启动即识别并自动拉起 DSH）
 COPY --from=dsh-builder /opt/dsh/ /opt/dsh/
 
-# 生成版本文件，供 CI（docker-build/.github/workflows/projects.yml）用 docker cp 提取 APP_VERSION 打镜像标签；
-# 若该文件缺失，CI 会回退为日期标签；admin 变体预装在 /opt/dsh，其余变体在 /usr/local
-RUN if [ "$DEV_TOOLS" = "admin" ]; then \
-      node -p "'APP_VERSION=' + require('/opt/dsh/lib/node_modules/@deepseek-ai/dsh/package.json').version" > /tmp/app_version.env; \
-    else \
-      node -p "'APP_VERSION=' + require('/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json').version" > /tmp/app_version.env; \
-    fi
-
-# 代理代码及其依赖（http-proxy）
-COPY proxy/ /app/proxy/
-RUN cd /app/proxy && npm install --omit=dev --no-audit --no-fund
-
-# 管理服务（admin 变体专用）：页面安装/切换 DSH 版本、配置 npm 源、托管 DSH 进程并反向代理
-COPY manager/ /app/manager/
-RUN cd /app/manager && npm install --omit=dev --no-audit --no-fund
-
 # 启动脚本（默认流程：先启动 DSH，等待就绪后启动代理）
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
@@ -76,38 +60,7 @@ RUN chmod +x /app/entrypoint.sh
 # 僵尸，SIGTERM 也无法送达整个进程组。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tini curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# admin 变体标记：镜像内存在 /app/.admin-mode 时 entrypoint.sh 改走管理服务
-# （预装最新 DSH，管理台仍可自选版本安装/切换、配置 npm 源）
-RUN if [ "$DEV_TOOLS" = "admin" ]; then touch /app/.admin-mode; fi
-
-# ── 开发工具（按 DEV_TOOLS 前缀从 .build-variants 读取工具列表安装）──
-# .build-variants 每行：<tag前缀>|<apt 工具列表>|<npm 全局包列表（可空）>|<uv 安装标记（1=装/空=不装）>，DEV_TOOLS 取第一列前缀值
-# 基础镜像（DEV_TOOLS=none）不装任何工具
-COPY .build-variants /app/.build-variants
-RUN if [ -n "$DEV_TOOLS" ] && [ "$DEV_TOOLS" != "none" ]; then \
-      PACKAGES="$(awk -F'|' -v p="$DEV_TOOLS" '$1==p {print $2}' /app/.build-variants)"; \
-      NPM_PKGS="$(awk -F'|' -v p="$DEV_TOOLS" '$1==p {print $3}' /app/.build-variants)"; \
-      UV_FLAG="$(awk -F'|' -v p="$DEV_TOOLS" '$1==p {print $4}' /app/.build-variants)"; \
-      if [ -n "$PACKAGES" ]; then \
-        apt-get update \
-        && apt-get install -y --no-install-recommends $PACKAGES \
-        && rm -rf /var/lib/apt/lists/*; \
-      fi; \
-      if [ -n "$NPM_PKGS" ]; then \
-        npm install -g --no-audit --no-fund $NPM_PKGS; \
-      fi; \
-      if [ "$UV_FLAG" = "1" ]; then \
-        curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh; \
-      fi; \
-    fi
-
-# ── 特殊测试 tag（DEV_TOOLS=test）：DSH 安装完毕后额外安装插件 ────────
-# 以最终运行用户 node 的 HOME 安装，确保插件落到 /home/node/.dsh 而非 /root/.dsh
-RUN if [ "$DEV_TOOLS" = "test" ]; then \
-      HOME=/home/node dsh plugin --profile web add github:smanx/dsh-fixed-providers#master; \
-    fi
+    && rm -rf /var/lib/apt/lists/* 
 
 # ── 权限收敛：运行期以非 root 用户 node 运行 ────────────────────────
 # DSH 自带终端能力（node-pty），root 运行会放大容器逃逸/越权风险。
@@ -117,13 +70,5 @@ RUN chown -R node:node /app /opt/dsh /home/node
 
 # 对外端口：代理/管理服务默认均监听 3080（DSH 在容器内监听 127.0.0.1:<DSH_PORT>，不直接暴露）
 EXPOSE 3080
-
-# 健康检查：探测代理端口。DSH 崩溃后代理仍存活（回 502），故这里探测的是
-# 「代理 + 上游」整链路——通过根目录（带认证会 401，仍算端口存活；无认证回 200）。
-# 用 node 内置 fetch，避免依赖 curl/wget（基础镜像未必带）。
-HEALTHCHECK --interval=30s --timeout=5s --start-period=130s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PROXY_PORT||3080)+'/').then(()=>process.exit(0)).catch(()=>process.exit(1))"
-
-USER node
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
