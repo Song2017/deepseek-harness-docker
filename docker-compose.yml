@@ -1,50 +1,15 @@
-# DeepSeek Harness (DSH) + Node 反向代理
-#
-# 用法：
-#   cp .env.example .env   # 填入 PROXY_PASSWORD（留空则每次启动生成随机密码）
-#   docker compose up -d   # 拉取镜像并启动
-#   docker compose logs -f # 查看日志（含随机密码）
-#
-# 想从源码构建而非拉取镜像：docker compose build && docker compose up -d
-
 services:
-  dsh-harness:
-    image: registry.cn-shanghai.aliyuncs.com/nsmi/deepseek-harness:latest
-    # 从本目录 Dockerfile 构建（可选，docker compose build 时使用）
-    build:
-      context: .
-      args:
-        # 固定 DSH 版本以获得可复现构建；默认 next（跟随上游预发布）
-        DSH_VERSION: ${DSH_VERSION:-next}
-        # 需要容器内开发/调试工具时改为 devtools / devtools-min / test / admin
-        DEV_TOOLS: ${DEV_TOOLS:-none}
-    container_name: dsh-harness
+  dsh:
+    build: .
     ports:
-      # 宿主机端口:代理端口。改 PROXY_PORT 时这里要同步改
-      - "${HOST_PORT:-3080}:${PROXY_PORT:-3080}"
-    volumes:
-      # DSH 会话/配置。容器以 node(uid 1000) 运行，故路径是 /home/node/.dsh
-      # 注意：docker 自动创建的 ./data/dsh 属主是 root，容器内 node(uid 1000)
-      # 无法写入。首次部署需在宿主机执行一次（1Panel 终端即可）：
-      #   mkdir -p ./data/dsh && chown -R 1000:1000 ./data/dsh
-      - dsh-data:/home/node/.dsh
+      - "3080:3080"
     environment:
-      # 认证：PROXY_PASSWORD 留空则 entrypoint.sh 自动生成随机密码并打印到日志
-      PROXY_USERNAME: ${PROXY_USERNAME:-admin}
-      PROXY_PASSWORD: ${PROXY_PASSWORD:-test2026}
-      # 端口（两者必须不同）
-      DSH_PORT: ${DSH_PORT:-3079}
-      PROXY_PORT: ${PROXY_PORT:-3080}
-      # 稳定性/限额调优，按需取消注释
-      # ALLOW_REMOTE_SETTINGS: "true"      # 设 false 关闭 isLoopbackHostname 改写
-      # DSH_READY_TIMEOUT: "120"           # 等待 DSH 就绪秒数
-      # DSH_LIVENESS_INTERVAL: "10000"     # DSH 存活探测间隔(ms)
-      # DSH_LOG_MAX_KB: "8192"             # 日志轮转触发阈值(KiB)
-      # DSH_LOG_KEEP_KB: "1024"            # 轮转后保留尾部(KiB)
-      # PROXY_MAX_BODY_BYTES: "33554432"   # 响应体缓冲上限(32 MiB)
-      # PROXY_MAX_DECOMPRESSED_BYTES: "67108864"  # 解压后上限(64 MiB)
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - PROXY_USERNAME=${PROXY_USERNAME:-}
+      - PROXY_PASSWORD=${PROXY_PASSWORD:-}
+    volumes:
+      - dsh-data:/home/node/.dsh
     restart: unless-stopped
-    # 镜像已内置 HEALTHCHECK，docker compose ps 会显示 (healthy)/(unhealthy)
 
 volumes:
   dsh-data:

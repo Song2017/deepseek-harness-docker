@@ -1,11 +1,6 @@
-node_modules
-proxy/node_modules
-manager/node_modules
 .git
 .gitignore
+*.md
 *.log
-*.err
-# 含明文密码，禁止打进镜像
+node_modules
 .env
-.env.*
-!.env.example
